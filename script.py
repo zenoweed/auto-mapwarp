@@ -1,7 +1,7 @@
 import cv2
+import numpy as np
 
-# Load images
-
+# Resize the image
 def resize_image(image, scale_percent=75):
     """Resize the given image by a scale percentage."""
     width = int(image.shape[1] * scale_percent / 100)
@@ -9,70 +9,95 @@ def resize_image(image, scale_percent=75):
     dim = (width, height)
     return cv2.resize(image, dim, interpolation=cv2.INTER_AREA)
 
-map_img = resize_image(cv2.imread('camurlim.jpg', cv2.IMREAD_GRAYSCALE))  # Map image
-template = resize_image(cv2.imread('camurlim.jpg', cv2.IMREAD_GRAYSCALE))  # Template image
+# Preprocess images to extract road-like structures
+def preprocess_image(image):
+    """Enhance the image to detect road structures."""
+    blurred = cv2.GaussianBlur(image, (5, 5), 0)  # Smooth image
+    edges = cv2.Canny(blurred, 50, 150)  # Edge detection
+    dilated = cv2.dilate(edges, None, iterations=2)  # Enhance roads
+    return dilated
+
+# Detect lines using Hough Line Transform
+def find_lines(image):
+    """Find line segments in the preprocessed image."""
+    return cv2.HoughLinesP(image, 1, np.pi / 180, threshold=50, minLineLength=50, maxLineGap=20)
+
+# Load images
+map_img = cv2.imread('camurlim.jpg', cv2.IMREAD_GRAYSCALE)  # Map image
+template = cv2.imread('camurlim.jpg', cv2.IMREAD_GRAYSCALE)  # Template image
 
 if map_img is None or template is None:
     print("Error: One or both images could not be loaded.")
     exit()
 
-# Initialize ORB detector
-orb = cv2.ORB_create(nfeatures=1000)  # Increase the number of features detected
+# Resize images
+map_img = resize_image(map_img)
+template = resize_image(template)
 
-# Detect keypoints and descriptors in both the map and template
-keypoints1, descriptors1 = orb.detectAndCompute(map_img, None)
-keypoints2, descriptors2 = orb.detectAndCompute(template, None)
+# Preprocess the images to emphasize roads
+processed_map = preprocess_image(map_img)
+processed_template = preprocess_image(template)
 
-# Match descriptors using BFMatcher
-bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-matches = bf.match(descriptors1, descriptors2)
+# Detect lines in the preprocessed images
+lines_map = find_lines(processed_map)
+lines_template = find_lines(processed_template)
 
-# Sort matches by distance, best matches first
-matches = sorted(matches, key=lambda x: x.distance)
+# Function to draw lines on images for visualization
+def draw_lines(image, lines, color=(0, 255, 0)):
+    """Draw detected lines on the image."""
+    if lines is not None:
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            cv2.line(image, (x1, y1), (x2, y2), color, 2)
 
-# Ensure that there are at least 3 good matches
-if len(matches) < 3:
-    print("Not enough matches found!")
-    exit()
+# Create copies for visualization
+map_with_lines = map_img.copy()
+template_with_lines = template.copy()
 
-# Extract top 3 control points (corresponding points in the map and template)
-control_points_map = []
-control_points_template = []
+# Draw the detected lines on the images
+draw_lines(map_with_lines, lines_map)
+draw_lines(template_with_lines, lines_template)
 
-for match in matches[:3]:  # Get the best 3 matches
-    control_points_map.append(keypoints1[match.queryIdx].pt)  # Points in map
-    control_points_template.append(keypoints2[match.trainIdx].pt)  # Points in template
+# Match lines (simple geometric matching by angle and distance)
+def match_lines(lines1, lines2, angle_threshold=10, distance_threshold=50):
+    """Match lines between two sets based on angle and distance."""
+    matches = []
+    for line1 in lines1:
+        x1, y1, x2, y2 = line1[0]
+        angle1 = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+        for line2 in lines2:
+            x3, y3, x4, y4 = line2[0]
+            angle2 = np.arctan2(y4 - y3, x4 - x3) * 180 / np.pi
+            # Check angle similarity
+            if abs(angle1 - angle2) < angle_threshold:
+                # Check distance similarity
+                dist = np.sqrt((x1 - x3) ** 2 + (y1 - y3) ** 2)
+                if dist < distance_threshold:
+                    matches.append((line1, line2))
+    return matches
 
-# Print control points for debugging
-print("Control Points in Map (X, Y):", control_points_map)
-print("Control Points in Template (X, Y):", control_points_template)
+# Match lines from map and template
+matched_lines = match_lines(lines_map, lines_template)
 
-# Draw matches on map and template images
-map_with_keypoints = cv2.drawKeypoints(map_img, keypoints1, None, color=(255, 0, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-template_with_keypoints = cv2.drawKeypoints(template, keypoints2, None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+# Draw matched lines
+matched_image = np.hstack((map_with_lines, template_with_lines))
+offset = map_with_lines.shape[1]  # Offset for the template in the matched image
 
-# Draw matches between control points
-matched_image = cv2.drawMatches(
-    map_with_keypoints, keypoints1, 
-    template_with_keypoints, keypoints2,
-    matches[:3], None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
-)
+for line1, line2 in matched_lines:
+    x1, y1, x2, y2 = line1[0]
+    x3, y3, x4, y4 = line2[0]
+    # Draw lines with connecting matches
+    cv2.line(matched_image, (x1, y1), (x3 + offset, y3), (0, 0, 255), 2)
+    cv2.line(matched_image, (x2, y2), (x4 + offset, y4), (0, 255, 255), 2)
 
-# Mark the control points with yellow circles on both images
-for pt in control_points_map:
-    x, y = int(pt[0]), int(pt[1])
-    cv2.circle(map_with_keypoints, (x, y), radius=10, color=(0, 255, 255), thickness=3)  # Yellow circle
+# Save the images with results
+cv2.imwrite("processed_map.jpg", map_with_lines)
+cv2.imwrite("processed_template.jpg", template_with_lines)
+cv2.imwrite("matched_lines.jpg", matched_image)
 
-for pt in control_points_template:
-    x, y = int(pt[0]), int(pt[1])
-    cv2.circle(template_with_keypoints, (x, y), radius=10, color=(0, 255, 255), thickness=3)  # Yellow circle
-
-# Save the images with keypoints and control points marked
-cv2.imwrite("marked_map.jpg", map_with_keypoints)
-cv2.imwrite("marked_template.jpg", template_with_keypoints)
-cv2.imwrite("matched_control_points.jpg", matched_image)
-
-# Show marked matches
-# # cv2.imshow("Matched Control Points", matched_image)
+# Optionally display results
+# cv2.imshow("Map with Roads", map_with_lines)
+# cv2.imshow("Template with Roads", template_with_lines)
+# cv2.imshow("Matched Roads", matched_image)
 # cv2.waitKey(0)
 # cv2.destroyAllWindows()
