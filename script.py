@@ -1,108 +1,97 @@
 import cv2
 import numpy as np
-import logging
-from time import time
+import osmnx as ox
+import requests
 
-# Logging setup
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG,
-)
+# 1. Load Regional Map and OpenStreetMap Base
+regional_map = cv2.imread('camurlim.jpg', cv2.IMREAD_GRAYSCALE)
+osm_map = cv2.imread('scr.jpg', cv2.IMREAD_GRAYSCALE)
 
-def preprocess_road_image(image):
-    """Enhance image to detect road contours."""
-    logging.debug("Preprocessing image for road detection...")
-    blurred = cv2.GaussianBlur(image, (5, 5), 0)
-    logging.debug("Applied Gaussian blur.")
-    edges = cv2.Canny(blurred, 50, 150)
-    logging.debug("Detected edges using Canny.")
-    return edges
+scale_percent = 50  # Adjust to reduce size (50% in this case)
+regional_map = cv2.resize(regional_map, (0, 0), fx=scale_percent/100, fy=scale_percent/100)
+# osm_map = cv2.resize(osm_map, (0, 0), fx=scale_percent/100, fy=scale_percent/100)
+# 2. Detect and Match Features
+sift = cv2.SIFT_create()
+kp1, des1 = sift.detectAndCompute(regional_map, None)
+kp2, des2 = sift.detectAndCompute(osm_map, None)
 
-def find_contours(image):
-    """Find contours in the preprocessed image."""
-    logging.debug("Finding contours in the image...")
-    contours, _ = cv2.findContours(image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    logging.debug(f"Found {len(contours)} contours.")
-    return contours
+# Use FLANN for Matching
+index_params = dict(algorithm=1, trees=5)
+search_params = dict(checks=50)
+flann = cv2.FlannBasedMatcher(index_params, search_params)
+matches = flann.knnMatch(des1, des2, k=2)
 
-def filter_and_approximate_contours(contours, epsilon_factor=0.01, min_area=100):
-    """Filter and simplify contours."""
-    logging.debug(f"Filtering and approximating contours with epsilon_factor={epsilon_factor}, min_area={min_area}...")
-    filtered_contours = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area >= min_area:
-            epsilon = epsilon_factor * cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, epsilon, True)
-            filtered_contours.append(approx)
-    logging.debug(f"Filtered to {len(filtered_contours)} contours.")
-    return filtered_contours
+# Filter Matches Using Lowe's Ratio Test
+good_matches = []
+for m, n in matches:
+    if m.distance < 0.7 * n.distance:
+        good_matches.append(m)
 
-def draw_contours(image, contours, color=(0, 255, 0)):
-    """Draw contours on the image."""
-    logging.debug(f"Drawing {len(contours)} contours on the image.")
-    image_with_contours = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    cv2.drawContours(image_with_contours, contours, -1, color, 2)
-    return image_with_contours
+# Extract Coordinates of Matches
+src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 2)
+dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 2)
 
-def match_contours(contours1, contours2, similarity_threshold=0.5):
-    """Match contours based on shape similarity."""
-    logging.debug("Matching contours between images...")
-    matches = []
-    for contour1 in contours1:
-        for contour2 in contours2:
-            # Calculate similarity using cv2.matchShapes
-            similarity = cv2.matchShapes(contour1, contour2, cv2.CONTOURS_MATCH_I1, 0)
-            if similarity < similarity_threshold:
-                matches.append((contour1, contour2))
-    logging.debug(f"Matched {len(matches)} contour pairs.")
-    return matches
+# 3. Compute Transformation Matrix and Warp
+H, status = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+warped_map = cv2.warpPerspective(regional_map, H, (osm_map.shape[1], osm_map.shape[0]))
 
-def process_land_usage_images(map_path, template_path):
-    start_time = time()
-    logging.info("Loading images...")
-    map_img = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
-    template_img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+# 4. Generate Control Points
+control_points = []
+for s, d in zip(src_pts, dst_pts):
+    control_points.append({'pixel_x': s[0], 'pixel_y': s[1], 'lon': d[0], 'lat': d[1]})
 
-    if map_img is None or template_img is None:
-        logging.error("Failed to load one or both images.")
-        return
+visualized_map = regional_map.copy()
+if len(visualized_map.shape) == 2:  # If grayscale, convert to color
+    visualized_map = cv2.cvtColor(visualized_map, cv2.COLOR_GRAY2BGR)
 
-    # Preprocess images for road detection
-    logging.info("Preprocessing images...")
-    map_edges = preprocess_road_image(map_img)
-    template_edges = preprocess_road_image(template_img)
+font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Find contours
-    map_contours = find_contours(map_edges)
-    template_contours = find_contours(template_edges)
+for idx, cp in enumerate(control_points):
+    x = int(cp['pixel_x'])
+    y = int(cp['pixel_y'])
+    lon = cp['lon']
+    lat = cp['lat']
+    
+    # Draw a circle at the control point
+    cv2.circle(visualized_map, (x, y), radius=5, color=(0, 255, 0), thickness=-1)
+    
+    # Annotate with control point information
+    label = f"#{idx} ({lon:.4f}, {lat:.4f})"
+    cv2.putText(visualized_map, label, (x + 10, y - 10), font, 0.4, (0, 255, 0), thickness=1)
+cv2.imwrite('control_points_visualized_regional.jpg', visualized_map)  # Save the output
 
-    # Filter and simplify contours
-    map_approx_contours = filter_and_approximate_contours(map_contours)
-    template_approx_contours = filter_and_approximate_contours(template_contours)
+visualized_map = osm_map.copy()
+if len(visualized_map.shape) == 2:  # If grayscale, convert to color
+    visualized_map = cv2.cvtColor(visualized_map, cv2.COLOR_GRAY2BGR)
 
-    # Draw and save processed images with contours
-    map_with_contours = draw_contours(map_img, map_approx_contours)
-    template_with_contours = draw_contours(template_img, template_approx_contours)
-    cv2.imwrite("map_with_road_contours.jpg", map_with_contours)
-    cv2.imwrite("template_with_road_contours.jpg", template_with_contours)
+font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Match contours
-    logging.info("Matching contours...")
-    matches = match_contours(map_approx_contours, template_approx_contours)
+for idx, cp in enumerate(control_points):
+    x = int(cp['pixel_x'])
+    y = int(cp['pixel_y'])
+    lon = cp['lon']
+    lat = cp['lat']
+    
+    # Draw a circle at the control point
+    cv2.circle(visualized_map, (x, y), radius=5, color=(0, 255, 0), thickness=-1)
+    
+    # Annotate with control point information
+    label = f"#{idx} ({lon:.4f}, {lat:.4f})"
+    cv2.putText(visualized_map, label, (x + 10, y - 10), font, 0.4, (0, 255, 0), thickness=1)
+cv2.imwrite('control_points_visualized_osm.jpg', visualized_map)  # Save the output
 
-    # Visualize matched contours
-    matched_img = np.hstack((map_img, template_img))
-    offset = map_img.shape[1]
-    for contour1, contour2 in matches:
-        for point in contour1:
-            cv2.circle(matched_img, tuple(point[0]), 2, (0, 255, 0), -1)
-        for point in contour2:
-            cv2.circle(matched_img, (point[0][0] + offset, point[0][1]), 2, (255, 0, 0), -1)
-
-    cv2.imwrite("matched_road_contours.jpg", matched_img)
-    logging.info(f"Processing complete. Matches found: {len(matches)}")
-    logging.info(f"Total processing time: {time() - start_time:.2f} seconds.")
-
-if __name__ == "__main__":
-    process_land_usage_images("camurlim.jpg", "camurlim.jpg")
+# 5. Upload to Mapwarper
+# api_key = 'your_api_key'
+# image_id = 'your_image_id'
+# for cp in control_points:
+#     payload = {
+#         'control_point': {
+#             'x': cp['pixel_x'],
+#             'y': cp['pixel_y'],
+#             'lon': cp['lon'],
+#             'lat': cp['lat']
+#         }
+#     }
+    # print("Payload being sent to API:", payload) 
+    # url = f"https://mapwarper.net/maps/{image_id}/gcps.json?key={api_key}"
+    # requests.post(url, json=payload)
