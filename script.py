@@ -1,103 +1,108 @@
 import cv2
 import numpy as np
+import logging
+from time import time
 
-# Resize the image
-def resize_image(image, scale_percent=75):
-    """Resize the given image by a scale percentage."""
-    width = int(image.shape[1] * scale_percent / 100)
-    height = int(image.shape[0] * scale_percent / 100)
-    dim = (width, height)
-    return cv2.resize(image, dim, interpolation=cv2.INTER_AREA)
+# Logging setup
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG,
+)
 
-# Preprocess images to extract road-like structures
-def preprocess_image(image):
-    """Enhance the image to detect road structures."""
-    blurred = cv2.GaussianBlur(image, (5, 5), 0)  # Smooth image
-    edges = cv2.Canny(blurred, 50, 150)  # Edge detection
-    dilated = cv2.dilate(edges, None, iterations=2)  # Enhance roads
-    return dilated
+def preprocess_road_image(image):
+    """Enhance image to detect road contours."""
+    logging.debug("Preprocessing image for road detection...")
+    blurred = cv2.GaussianBlur(image, (5, 5), 0)
+    logging.debug("Applied Gaussian blur.")
+    edges = cv2.Canny(blurred, 50, 150)
+    logging.debug("Detected edges using Canny.")
+    return edges
 
-# Detect lines using Hough Line Transform
-def find_lines(image):
-    """Find line segments in the preprocessed image."""
-    return cv2.HoughLinesP(image, 1, np.pi / 180, threshold=50, minLineLength=50, maxLineGap=20)
+def find_contours(image):
+    """Find contours in the preprocessed image."""
+    logging.debug("Finding contours in the image...")
+    contours, _ = cv2.findContours(image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    logging.debug(f"Found {len(contours)} contours.")
+    return contours
 
-# Load images
-map_img = cv2.imread('camurlim.jpg', cv2.IMREAD_GRAYSCALE)  # Map image
-template = cv2.imread('camurlim.jpg', cv2.IMREAD_GRAYSCALE)  # Template image
+def filter_and_approximate_contours(contours, epsilon_factor=0.01, min_area=100):
+    """Filter and simplify contours."""
+    logging.debug(f"Filtering and approximating contours with epsilon_factor={epsilon_factor}, min_area={min_area}...")
+    filtered_contours = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area >= min_area:
+            epsilon = epsilon_factor * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            filtered_contours.append(approx)
+    logging.debug(f"Filtered to {len(filtered_contours)} contours.")
+    return filtered_contours
 
-if map_img is None or template is None:
-    print("Error: One or both images could not be loaded.")
-    exit()
+def draw_contours(image, contours, color=(0, 255, 0)):
+    """Draw contours on the image."""
+    logging.debug(f"Drawing {len(contours)} contours on the image.")
+    image_with_contours = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    cv2.drawContours(image_with_contours, contours, -1, color, 2)
+    return image_with_contours
 
-# Resize images
-map_img = resize_image(map_img)
-template = resize_image(template)
-
-# Preprocess the images to emphasize roads
-processed_map = preprocess_image(map_img)
-processed_template = preprocess_image(template)
-
-# Detect lines in the preprocessed images
-lines_map = find_lines(processed_map)
-lines_template = find_lines(processed_template)
-
-# Function to draw lines on images for visualization
-def draw_lines(image, lines, color=(0, 255, 0)):
-    """Draw detected lines on the image."""
-    if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            cv2.line(image, (x1, y1), (x2, y2), color, 2)
-
-# Create copies for visualization
-map_with_lines = map_img.copy()
-template_with_lines = template.copy()
-
-# Draw the detected lines on the images
-draw_lines(map_with_lines, lines_map)
-draw_lines(template_with_lines, lines_template)
-
-# Match lines (simple geometric matching by angle and distance)
-def match_lines(lines1, lines2, angle_threshold=10, distance_threshold=50):
-    """Match lines between two sets based on angle and distance."""
+def match_contours(contours1, contours2, similarity_threshold=0.5):
+    """Match contours based on shape similarity."""
+    logging.debug("Matching contours between images...")
     matches = []
-    for line1 in lines1:
-        x1, y1, x2, y2 = line1[0]
-        angle1 = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
-        for line2 in lines2:
-            x3, y3, x4, y4 = line2[0]
-            angle2 = np.arctan2(y4 - y3, x4 - x3) * 180 / np.pi
-            # Check angle similarity
-            if abs(angle1 - angle2) < angle_threshold:
-                # Check distance similarity
-                dist = np.sqrt((x1 - x3) ** 2 + (y1 - y3) ** 2)
-                if dist < distance_threshold:
-                    matches.append((line1, line2))
+    for contour1 in contours1:
+        for contour2 in contours2:
+            # Calculate similarity using cv2.matchShapes
+            similarity = cv2.matchShapes(contour1, contour2, cv2.CONTOURS_MATCH_I1, 0)
+            if similarity < similarity_threshold:
+                matches.append((contour1, contour2))
+    logging.debug(f"Matched {len(matches)} contour pairs.")
     return matches
 
-# Match lines from map and template
-matched_lines = match_lines(lines_map, lines_template)
+def process_land_usage_images(map_path, template_path):
+    start_time = time()
+    logging.info("Loading images...")
+    map_img = cv2.imread(map_path, cv2.IMREAD_GRAYSCALE)
+    template_img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
 
-# Draw matched lines
-matched_image = np.hstack((map_with_lines, template_with_lines))
-offset = map_with_lines.shape[1]  # Offset for the template in the matched image
+    if map_img is None or template_img is None:
+        logging.error("Failed to load one or both images.")
+        return
 
-for line1, line2 in matched_lines:
-    x1, y1, x2, y2 = line1[0]
-    x3, y3, x4, y4 = line2[0]
-    # Draw lines with connecting matches
-    cv2.line(matched_image, (x1, y1), (x3 + offset, y3), (0, 0, 255), 2)
-    cv2.line(matched_image, (x2, y2), (x4 + offset, y4), (0, 255, 255), 2)
+    # Preprocess images for road detection
+    logging.info("Preprocessing images...")
+    map_edges = preprocess_road_image(map_img)
+    template_edges = preprocess_road_image(template_img)
 
-# Save the images with results
-cv2.imwrite("processed_map.jpg", map_with_lines)
-cv2.imwrite("processed_template.jpg", template_with_lines)
-cv2.imwrite("matched_lines.jpg", matched_image)
+    # Find contours
+    map_contours = find_contours(map_edges)
+    template_contours = find_contours(template_edges)
 
-# Optionally display results
-# cv2.imshow("Map with Roads", map_with_lines)
-# cv2.imshow("Template with Roads", template_with_lines)
-# cv2.imshow("Matched Roads", matched_image)
-# cv2.waitKey(0)
-# cv2.destroyAllWindows()
+    # Filter and simplify contours
+    map_approx_contours = filter_and_approximate_contours(map_contours)
+    template_approx_contours = filter_and_approximate_contours(template_contours)
+
+    # Draw and save processed images with contours
+    map_with_contours = draw_contours(map_img, map_approx_contours)
+    template_with_contours = draw_contours(template_img, template_approx_contours)
+    cv2.imwrite("map_with_road_contours.jpg", map_with_contours)
+    cv2.imwrite("template_with_road_contours.jpg", template_with_contours)
+
+    # Match contours
+    logging.info("Matching contours...")
+    matches = match_contours(map_approx_contours, template_approx_contours)
+
+    # Visualize matched contours
+    matched_img = np.hstack((map_img, template_img))
+    offset = map_img.shape[1]
+    for contour1, contour2 in matches:
+        for point in contour1:
+            cv2.circle(matched_img, tuple(point[0]), 2, (0, 255, 0), -1)
+        for point in contour2:
+            cv2.circle(matched_img, (point[0][0] + offset, point[0][1]), 2, (255, 0, 0), -1)
+
+    cv2.imwrite("matched_road_contours.jpg", matched_img)
+    logging.info(f"Processing complete. Matches found: {len(matches)}")
+    logging.info(f"Total processing time: {time() - start_time:.2f} seconds.")
+
+if __name__ == "__main__":
+    process_land_usage_images("camurlim.jpg", "camurlim.jpg")
